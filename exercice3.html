@@ -371,6 +371,7 @@ let step = 0;          // 0-9 = phrases, 10-19 = MCQ
 let submitted = false;
 let allResults = [];   // {type, correct, details} per question
 let studentData = {};
+let sessionId = '';    // généré côté client, sert à retrouver la ligne dans Sheets
 const TOTAL = PHRASES.length + MCQ.length; // 20
 
 // Category tracking for phrases
@@ -384,8 +385,10 @@ function startQuiz() {
   const groupe = document.getElementById('f-groupe').value;
   if (!prenom || !nom || !groupe) { alert('Complète tous les champs !'); return; }
   studentData = {prenom, nom, groupe};
+  sessionId = Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
   document.getElementById('auth-screen').style.display = 'none';
   document.getElementById('quiz-screen').style.display = 'block';
+  sendInit();
   render();
 }
 
@@ -521,6 +524,8 @@ function validatePhrase(idx) {
     result: `${finalIcon} ${correct_count}/5`
   });
 
+  sendQuestion(step + 1, `${finalIcon} ${correct_count}/5`);
+
   document.getElementById('btn-valider').style.display = 'none';
   document.getElementById('btn-next').style.display = 'block';
 }
@@ -554,6 +559,8 @@ function validateMCQ(idx) {
     label:`Q${idx+1}: ${q.q.substring(0,45)}…`,
     result: isOk?'✅':'❌'
   });
+
+  sendQuestion(PHRASES.length + idx + 1, isOk ? '✅ 1/1' : '❌ 0/1');
 
   document.getElementById('btn-valider').style.display = 'none';
   document.getElementById('btn-next').style.display = 'block';
@@ -663,57 +670,81 @@ function showResults() {
       <a class="home-btn" href="index.html">← Retour aux exercices</a>
     </div>`;
 
-  sendResults(pct, p1pts, p2pts);
+  sendFinal(finalPct, p1pts, p2pts);
 }
 
-// ── SEND TO SHEETS ────────────────────────────────────────────────
-async function sendResults(pct, p1pts, p2pts) {
+// ── ENVOI APPS SCRIPT (temps réel via sessionId) ──────────────────
+
+function apiFetch(payload) {
+  fetch(APPS_SCRIPT_URL, {
+    method:  'POST',
+    mode:    'no-cors',
+    headers: {'Content-Type': 'text/plain'},
+    body:    JSON.stringify(payload)
+  }).catch(e => console.error('apiFetch:', e));
+}
+
+function computeRunningPct() {
+  const pPts = allResults.filter(r=>r.section==='phrase').reduce((s,r)=>s+r.correct_count, 0);
+  const mPts = allResults.filter(r=>r.section==='mcq').reduce((s,r)=>s+r.correct_count, 0);
+  return Math.round((pPts + mPts) / (PHRASES.length*5 + MCQ.length) * 100);
+}
+
+function sendInit() {
+  apiFetch({
+    action:    'init',
+    feuille:   'exercice3',
+    sessionId,
+    prenom:    studentData.prenom,
+    nom:       studentData.nom,
+    groupe:    studentData.groupe
+  });
+}
+
+function sendQuestion(qNum, result) {
+  apiFetch({
+    action:     'question',
+    feuille:    'exercice3',
+    sessionId,
+    questionNum: qNum,
+    result,
+    score_pct:  computeRunningPct()
+  });
+}
+
+async function sendFinal(pct, p1pts, p2pts) {
   const statusEl = document.getElementById('sending-status');
   if (statusEl) {
     statusEl.style.cssText = 'display:block;margin-top:1rem;padding:.8rem 1rem;border-radius:8px;font-size:.9rem;font-weight:600;background:rgba(124,106,247,.1);border:1px solid rgba(124,106,247,.3);color:#c8c0ff;';
-    statusEl.textContent = '⏳ Envoi des résultats…';
+    statusEl.textContent = '⏳ Finalisation des résultats…';
   }
 
   const phraseResults = allResults.filter(r => r.section === 'phrase');
   const mcqResults    = allResults.filter(r => r.section === 'mcq');
-
   const catPcts = {};
   for (const k of ['type','posNeg','actPass','neuEmph','persImpers']) {
     catPcts[k] = catTotals[k] > 0 ? Math.round(catScores[k]/catTotals[k]*100) + '%' : '0%';
   }
 
-  const payload = {
-    feuille:      "exercice3",
-    prenom:       studentData.prenom,
-    nom:          studentData.nom,
-    groupe:       studentData.groupe,
-    score_pct:    pct,
-    score_p1:     p1pts + "/" + (PHRASES.length*5),
-    score_p2:     p2pts + "/" + MCQ.length,
-    type_pct:     catPcts.type,
-    posneg_pct:   catPcts.posNeg,
-    actpass_pct:  catPcts.actPass,
-    neuemph_pct:  catPcts.neuEmph,
-    persimpers_pct: catPcts.persImpers,
-    phrases: phraseResults.map(r => r.result).join(", "),
-    mcq:     mcqResults.map(r => r.result).join(", ")
-  };
+  apiFetch({
+    action:          'final',
+    feuille:         'exercice3',
+    sessionId,
+    score_pct:       pct,
+    score_p1:        p1pts + '/' + (PHRASES.length*5),
+    score_p2:        p2pts + '/' + MCQ.length,
+    type_pct:        catPcts.type,
+    posneg_pct:      catPcts.posNeg,
+    actpass_pct:     catPcts.actPass,
+    neuemph_pct:     catPcts.neuEmph,
+    persimpers_pct:  catPcts.persImpers,
+    phrases:         phraseResults.map(r => r.result).join(', '),
+    mcq:             mcqResults.map(r => r.result).join(', ')
+  });
 
-  try {
-    await fetch(APPS_SCRIPT_URL, {
-      method:'POST', mode:'no-cors',
-      headers:{'Content-Type':'text/plain'},
-      body:JSON.stringify(payload)
-    });
-    if (statusEl) {
-      statusEl.style.cssText = 'display:block;margin-top:1rem;padding:.8rem 1rem;border-radius:8px;font-size:.9rem;font-weight:600;background:rgba(42,157,143,.12);border:1px solid rgba(42,157,143,.3);color:#7ee8a2;';
-      statusEl.textContent = '✅ Résultats envoyés à ton enseignant·e !';
-    }
-  } catch(err) {
-    if (statusEl) {
-      statusEl.style.cssText = 'display:block;margin-top:1rem;padding:.8rem 1rem;border-radius:8px;font-size:.9rem;font-weight:600;background:rgba(230,57,70,.1);border:1px solid rgba(230,57,70,.3);color:#ffb3b3;';
-      statusEl.textContent = '❌ Erreur réseau — préviens ton enseignant·e.';
-    }
+  if (statusEl) {
+    statusEl.style.cssText = 'display:block;margin-top:1rem;padding:.8rem 1rem;border-radius:8px;font-size:.9rem;font-weight:600;background:rgba(42,157,143,.12);border:1px solid rgba(42,157,143,.3);color:#7ee8a2;';
+    statusEl.textContent = '✅ Résultats envoyés à ton enseignant·e !';
   }
 }
 </script>
