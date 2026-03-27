@@ -834,7 +834,7 @@ async function sendFinal(pct, coordScore, phraseScore) {
       score_brut:   score + '/' + QUESTIONS.length,
       coord_score:  coordScore + '/12',
       phrase_score: phraseScore + '/8',
-      details:      allResults.map((r, i) => (r.ok ? '✅' : '❌')).join(' ')
+      q_results:    allResults.map(r => r.ok ? '✅ 1/1' : '❌ 0/1').join(',')
     });
     if (!res || res.status !== 'ok') throw new Error((res && res.message) || 'Réponse invalide');
     if (statusEl) {
